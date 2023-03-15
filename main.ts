@@ -1,14 +1,24 @@
 import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting } from 'obsidian';
-
-// Remember to rename these classes and interfaces!
+import * as path from "path";
+import { writeFile } from "file_util";
+import { updateHexoPage, uploadBlogSource } from "hexo_util";
+import { generateFullBlog, processImages } from "blog_process";
 
 interface MyPluginSettings {
-	mySetting: string;
+	hexoRoot: string;
 }
 
 const DEFAULT_SETTINGS: MyPluginSettings = {
-	mySetting: 'default'
+	hexoRoot: ""
 }
+
+const BLOG_TITLE:     string = "标题"
+const BLOG_TAG: 	  string = "标签"
+const BLOG_CATEGORY:  string = "分类"
+const BLOG_POST_BLOG: string = "发布"
+
+const HEXO_BLOG_SOURCE_PATH  = "/source/_posts"
+const HEXO_BLOG_SOURCE_IMAGES_PATH  = "/source/imgs"
 
 export default class MyPlugin extends Plugin {
 	settings: MyPluginSettings;
@@ -16,54 +26,64 @@ export default class MyPlugin extends Plugin {
 	async onload() {
 		await this.loadSettings();
 
-		// This creates an icon in the left ribbon.
-		const ribbonIconEl = this.addRibbonIcon('dice', 'Sample Plugin', (evt: MouseEvent) => {
-			// Called when the user clicks the icon.
-			new Notice('This is a notice!');
-		});
-		// Perform additional things with the ribbon
-		ribbonIconEl.addClass('my-plugin-ribbon-class');
-
 		// This adds a status bar item to the bottom of the app. Does not work on mobile apps.
 		const statusBarItemEl = this.addStatusBarItem();
 		statusBarItemEl.setText('Status Bar Text');
 
-		// This adds a simple command that can be triggered anywhere
+		let that = this;
 		this.addCommand({
-			id: 'open-sample-modal-simple',
-			name: 'Open sample modal (simple)',
-			callback: () => {
-				new SampleModal(this.app).open();
-			}
-		});
-		// This adds an editor command that can perform some operation on the current editor instance
-		this.addCommand({
-			id: 'sample-editor-command',
-			name: 'Sample editor command',
+			id: 'post-blog-to-hexo-command',
+			name: 'post blog to hexo',
 			editorCallback: (editor: Editor, view: MarkdownView) => {
-				console.log(editor.getSelection());
-				editor.replaceSelection('Sample Editor Command');
-			}
-		});
-		// This adds a complex command that can check whether the current state of the app allows execution of the command
-		this.addCommand({
-			id: 'open-sample-modal-complex',
-			name: 'Open sample modal (complex)',
-			checkCallback: (checking: boolean) => {
-				// Conditions to check
-				const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
-				if (markdownView) {
-					// If checking is true, we're simply "checking" if the command can be run.
-					// If checking is false, then we want to actually perform the operation.
-					if (!checking) {
-						new SampleModal(this.app).open();
+				const onSubmit = (title: string, tag: string, category: string, content: string) => {
+					if (!(this.settings.hexoRoot && this.settings.hexoRoot.length > 0)) {
+						new Notice("请先设置hexo根目录");
+						return;
 					}
 
-					// This command will only show up in Command Palette when the check function returns true
-					return true;
+					if (!(title && title.length > 0)) {
+						new Notice("标题为空");
+						return;
+					}
+
+					let fullBlog = generateFullBlog(title, tag, category, content)
+
+					let fileName = title + ".md";
+					let dirPath = path.join(this.settings.hexoRoot, HEXO_BLOG_SOURCE_PATH)
+
+					let imgDirPath = path.join(this.settings.hexoRoot, "/source")
+					
+					const activeFile = that.app.workspace.getActiveFile();
+					if (!activeFile) {
+						return;
+					}
+					
+					let absolutePath = decodeURI(that.app.vault.adapter.getResourcePath(activeFile.parent.path));
+					absolutePath = absolutePath.substring(12)
+					absolutePath = absolutePath.substring(0, absolutePath.lastIndexOf('?'))
+
+					const originFilePath: string = path.join(absolutePath, "/img");
+					
+					fullBlog = processImages(fullBlog, title, originFilePath, imgDirPath)
+
+					new Notice("正在发布博客: " + title)
+
+					// generate blog file in hexo source dir
+					writeFile(dirPath, fileName, fullBlog);
+
+					// post blog to github page
+					updateHexoPage(this.settings.hexoRoot)
+
+					// upload blog file sources to github
+					uploadBlogSource(this.settings.hexoRoot);
 				}
+
+				const content = editor.getValue();
+
+				new BlogSettingModal(this.app, content, onSubmit).open();
 			}
-		});
+		})
+
 
 		// This adds a settings tab so the user can configure various aspects of the plugin
 		this.addSettingTab(new SampleSettingTab(this.app, this));
@@ -91,14 +111,59 @@ export default class MyPlugin extends Plugin {
 	}
 }
 
-class SampleModal extends Modal {
-	constructor(app: App) {
+// modal to set blog setting
+class BlogSettingModal extends Modal {
+	title: string;		// blog title
+	tag: string;		// blog tag
+	category: string;	// blog category
+	content: string;	// blog content
+	onSubmit: (title: string, tag: string, category: string, content: string) => void;	// action when submit button clicked
+
+	constructor(app: App, content: string, onSubmit: (title: string, tag: string, category: string, content: string) => void) {
 		super(app);
+		this.content = content;
+		this.onSubmit = onSubmit;
 	}
 
 	onOpen() {
 		const {contentEl} = this;
-		contentEl.setText('Woah!');
+
+		contentEl.createEl("h1", {text: "博客设置"})
+
+		// blog title
+		new Setting(contentEl)
+			.setName(BLOG_TITLE)
+			.addText((text) => 
+				text.onChange((value) => {
+					this.title = value;
+			}))
+
+		// blog tag
+		new Setting(contentEl)
+			.setName(BLOG_TAG)
+			.addText((text) => 
+				text.onChange((value) => {
+					this.tag = value;
+			}));
+
+		// blog category
+		new Setting(contentEl)
+			.setName(BLOG_CATEGORY)
+			.addText((text) => 
+				text.onChange((value) => {
+					this.category = value;
+			}));
+
+		// blog post button
+		new Setting(contentEl)
+			.addButton((btn) => 
+				btn
+					.setButtonText(BLOG_POST_BLOG)
+					.setCta()
+					.onClick(() => {
+						this.close();
+						this.onSubmit(this.title, this.tag, this.category, this.content)
+					}));
 	}
 
 	onClose() {
@@ -120,17 +185,17 @@ class SampleSettingTab extends PluginSettingTab {
 
 		containerEl.empty();
 
-		containerEl.createEl('h2', {text: 'Settings for my awesome plugin.'});
+		containerEl.createEl('h2', {text: 'Settings for post blog to hexo.'});
 
 		new Setting(containerEl)
-			.setName('Setting #1')
-			.setDesc('It\'s a secret')
+			.setName('hexo root path')
+			.setDesc('Your hexo directory root path')
 			.addText(text => text
-				.setPlaceholder('Enter your secret')
-				.setValue(this.plugin.settings.mySetting)
+				.setPlaceholder('Enter your hexo path')
+				.setValue(this.plugin.settings.hexoRoot)
 				.onChange(async (value) => {
-					console.log('Secret: ' + value);
-					this.plugin.settings.mySetting = value;
+					console.log('hexo path: ' + value);
+					this.plugin.settings.hexoRoot = value;
 					await this.plugin.saveSettings();
 				}));
 	}
